@@ -317,8 +317,8 @@
 
 ```bash
 # 克隆项目
-git clone https://github.com/yourusername/agri-assistant.git
-cd agri-assistant
+git clone https://github.com/lizhigen-max/AgriMind.git
+cd AgriMind
 ```
 
 ```bash
