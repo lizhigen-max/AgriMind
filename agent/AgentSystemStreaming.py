@@ -23,6 +23,7 @@ from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, END, START
 from langgraph.graph.message import add_messages
 from typing import List, Dict, Any, Optional, TypedDict, Literal, Annotated, Callable
+from langchain_core.documents import Document
 from pydantic import BaseModel
 from langchain_huggingface import HuggingFaceEmbeddings
 from modelscope import AutoModelForSequenceClassification, AutoTokenizer
@@ -41,6 +42,9 @@ class AgentState(TypedDict):
     intent: Optional[Intent]  # 用户意图，使用哪个智能体
     classify_info: Optional[StructOutput]  # 用户问题详细拆解
     confidence: Optional[float]
+    embeddings_values: List[Document]   # 混合检索结果
+    bm25_values: List[Document]   # 关键字检索结果
+    reranker_values: List[Document]  # 重排序结果
     response: Optional[str]  # 返回
     memory_context: Optional[str]
     signals: Optional[Dict]
@@ -89,63 +93,19 @@ class AgentSystemStreaming:
             config=MemoryConfig()
         )
 
-        # ========== 记忆系统初始化 ==========
-        # 1. 存储层
-        # self.permanent_store = PermanentMemoryStore(
-        #     storage_path="./data/permanent"
-        # )
-        # self.short_term_store = ShortTermMemoryStore(
-        #     embeddings=self.vector_model,
-        #     storage_path="./data/short_term",
-        #     max_entries=10000
-        # )
-        #
-        # # 2. 分类器
-        # self.lightweight_classifier = LightweightClassifier()
-        #
-        # # 3. 摘要中间件
-        # summarization_middleware = SummarizationMiddleware(
-        #     llm=self.model_default,
-        #     max_messages_before_summary=10,
-        #     max_tokens_in_context=4000
-        # )
-        #
-        # # 4. 动态上下文管理器
-        # self.context_manager = DynamicContextManager(
-        #     summarization_middleware=summarization_middleware,
-        #     permanent_store=self.permanent_store,
-        #     max_context_tokens=6000
-        # )
-        #
-        # # 5. 智能记忆检查器
-        # self.memory_checker = SmartMemoryChecker(
-        #     permanent_store=self.permanent_store,
-        #     short_term_store=self.short_term_store,
-        #     classifier=self.lightweight_classifier,
-        #     context_manager=self.context_manager
-        # )
-        #
-        # # 6. 延迟保存管理器
-        # extraction_agent = PreciseExtractionAgent(llm=self.model_default)
-        # self.deferred_manager = DeferredMemoryManager(
-        #     permanent_store=self.permanent_store,
-        #     short_term_store=self.short_term_store,
-        #     extraction_agent=extraction_agent
-        # )
-
         # ========== Agent初始化 ==========
 
         self.intent_classifier = IntentClassifier(model=self.model_default)
-        processor = RAGProcessor(
+        self.processor = RAGProcessor(
             self.model_default,
             config=rag_config,
             reranker_tokenizer=self.reranker_tokenizer,
             reranker_model=self.reranker_model,
             vector_model=self.vector_model
         )
-        processor.load_vector_store()
+        self.processor.load_vector_store()
         # 使用流式版本的农事代理
-        self.agronomistAgent = AgronomistAgentStreaming(model=self.model_default, rag_processor=processor)
+        self.agronomistAgent = AgronomistAgentStreaming(model=self.model_default)
         self.ordinaryAgent = OrdinaryAgentStreaming(model=self.model_default)
 
         # 构建工作流图
@@ -155,7 +115,7 @@ class AgentSystemStreaming:
     def _build_graph(self) -> StateGraph:
         """构建 LangGraph 工作流"""
 
-        async def load_memory(state: AgentState) -> AgentState:
+        async def load_memory(state: AgentState) -> dict:
             """加载用户记忆上下文"""
             logging.info("📚 加载用户记忆上下文...")
             if state.get("streaming_callback"):
@@ -167,12 +127,6 @@ class AgentSystemStreaming:
             # 从记忆管理器加载上下文
             memory_context: MemoryContext = await self.memory_manager.load_memory_context(user_id)
 
-            # 将记忆上下文放入state
-            state["prepared_messages"] = memory_context.context_messages  # 包含历史摘要信息
-            state["memory_context"] = (
-                memory_context.summary.summary_text
-                if memory_context.summary else None
-            )
             if state.get("streaming_callback"):
                 total_num = memory_context.total_dialogues
                 if total_num > 4:
@@ -184,9 +138,13 @@ class AgentSystemStreaming:
                 await state["streaming_callback"](msg)
 
             logging.info(f"✓ 已加载 {len(memory_context.recent_dialogues)} 轮历史对话")
-            return state
+            return {'prepared_messages': memory_context.context_messages,
+                    'memory_context': (
+                    memory_context.summary.summary_text
+                    if memory_context.summary else None
+                )}
 
-        async def classify_intent(state: AgentState) -> AgentState:
+        async def classify_intent(state: AgentState) -> dict:
             """分类用户意图"""
             logging.info("🔍 分析用户意图...")
             if state.get("streaming_callback"):
@@ -195,14 +153,10 @@ class AgentSystemStreaming:
             query = state["query"]
             result: StructOutput = await self.intent_classifier.classify(query)
 
-            state["intent"] = result.intent
-            state["confidence"] = result.confidence
-            state["classify_info"] = result
-
-            logging.info(f"意图: {state['intent']} (置信度: {state['confidence']:.2f})")
+            logging.info(f"意图: {result.intent} (置信度: {result.confidence:.2f})")
             if state.get("streaming_callback"):
-                await state["streaming_callback"](f"用户的意图是: {state['intent']} (置信度: {state['confidence']:.2f})，原因是：{result.reason}\n")
-            return state
+                await state["streaming_callback"](f"用户的意图是: {result.intent} (置信度: {result.confidence:.2f})，原因是：{result.reason}\n")
+            return {"intent": result.intent, "confidence": result.confidence, "classify_info": result}
 
         def route_to_agent(state: AgentState) -> Literal["agronomist", "ordinary"]:
             """路由到对应代理"""
@@ -213,18 +167,74 @@ class AgentSystemStreaming:
                 return "ordinary"
             return intent
 
-        async def agronomist_handler(state: AgentState) -> AgentState:
+        async def middle_handler(state: AgentState) -> dict:
+            '''中转 后面链接向量检索和关键字检索，同步执行'''
+            return {}
+
+        async def embeddings_handler(state: AgentState) -> dict:
+            '''向量检索'''
+            query = state["query"]
+            if state.get("streaming_callback"):
+                await state["streaming_callback"](f'🔧 向量检索（{query}）中...\n')
+            logging.info(f'🔧 向量检索（{query}）中...')
+            results = await self.processor.avector_search(query)
+            if state.get("streaming_callback"):
+                await state["streaming_callback"](f'🔧 向量检索（{query}），共检索到{len(results)}个结果\n')
+            logging.info(f'🔧 向量检索（{query}），共检索到{len(results)}个结果')
+
+            return {'embeddings_values': results}
+
+        async def bm25_handler(state: AgentState) -> dict:
+            '''关键字检索'''
+            query = state["query"]
+            if state.get("streaming_callback"):
+                await state["streaming_callback"](f'🔧 关键字检索（{query}）中...\n')
+            logging.info(f'🔧 关键字检索（{query}）中...')
+            results = await self.processor.abm25_search(query)
+            if state.get("streaming_callback"):
+                await state["streaming_callback"](f'🔧 关键字检索（{query}），共检索到{len(results)}个结果\n')
+            logging.info(f'🔧 关键字检索（{query}），共检索到{len(results)}个结果')
+
+            return {'bm25_values': results}
+
+        async def reranker_handler(state: AgentState) -> dict:
+            '''重排序'''
+            query = state["query"]
+            if state.get("streaming_callback"):
+                await state["streaming_callback"](f'🔧 重排序（{query}）中...\n')
+            logging.info(f'🔧 重排序（{query}）中...')
+            results = await self.processor.embeddings_and_bm25_with_rerank(query, embeddings_values=state["embeddings_values"],
+                                                                     bm25_values=state["bm25_values"])
+            if state.get("streaming_callback"):
+                await state["streaming_callback"](f'🔧 重排序（{query}），保留{len(results)}个结果\n')
+                if results:
+                    for i, item in enumerate(results):
+                        if isinstance(item, tuple):
+                            doc, _ = item
+                        else:
+                            doc = item
+                        if state["streaming_callback"]:
+                            await state["streaming_callback"](f'检索到的第{i + 1}个文档：\n')
+                            await state["streaming_callback"](f'{doc.page_content}\n')
+            logging.info(f'🔧 重排序（{query}），保留{len(results)}个结果')
+
+            return {'reranker_values': results}
+
+        async def agronomist_handler(state: AgentState) -> dict:
             """农事管理处理"""
             logging.info("🔧 农事管理问题处理中...")
+            if state.get("streaming_callback"):
+                await state["streaming_callback"](f'好的，我已经准备好回答用户的提问了！</think>\n')
+
             classify_info: StructOutput = state["classify_info"]
 
             # 调用流式处理方法
             response_content = ""
             async for chunk in self.agronomistAgent.handle_stream(
                 state["query"],
-                classify_info,
-                context_messages=state.get("prepared_messages"),
-                streaming_callback=state.get('streaming_callback', None)
+                classify_info=classify_info,
+                reranker_doc=state["reranker_values"],
+                context_messages=state.get("prepared_messages")
             ):
                 response_content += chunk
                 # 如果有流式回调函数，则调用它
@@ -234,10 +244,9 @@ class AgentSystemStreaming:
                     # 否则直接打印到控制台
                     print(chunk, end='', flush=True)
 
-            state["response"] = response_content
-            return state
+            return {'response': response_content}
 
-        async def ordinary_handler(state: AgentState) -> AgentState:
+        async def ordinary_handler(state: AgentState) -> dict:
             """其他问题处理"""
             logging.info("🔧 其他问题处理中...")
             if state.get("streaming_callback"):
@@ -259,10 +268,9 @@ class AgentSystemStreaming:
                     # 否则直接打印到控制台
                     print(chunk, end='', flush=True)
 
-            state["response"] = response_content
-            return state
+            return {'response': response_content}
 
-        async def save_memory(state: AgentState) -> AgentState:
+        async def save_memory(state: AgentState) -> dict:
             """保存对话记忆"""
             logging.info("💾 保存对话记忆...")
 
@@ -281,7 +289,7 @@ class AgentSystemStreaming:
                 confidence=confidence
             )
 
-            return state
+            return {}
 
         # 构建图
         graph = StateGraph(AgentState)
@@ -289,6 +297,10 @@ class AgentSystemStreaming:
         # 添加节点
         graph.add_node("load_memory", load_memory)
         graph.add_node("classify", classify_intent)
+        graph.add_node("middle", middle_handler)
+        graph.add_node("embeddings", embeddings_handler)
+        graph.add_node("bm25", bm25_handler)
+        graph.add_node("reranker", reranker_handler)
         graph.add_node("agronomist", agronomist_handler)
         graph.add_node("ordinary", ordinary_handler)
         graph.add_node("save_memory", save_memory)
@@ -302,11 +314,16 @@ class AgentSystemStreaming:
             "classify",
             route_to_agent,
             {
-                "agronomist": "agronomist",
+                "agronomist": "middle",  # 先转到中转站
                 "ordinary": "ordinary"
             }
         )
 
+        graph.add_edge("middle", "embeddings")
+        graph.add_edge("middle", "bm25")    # 同步向量检索和关键字检索
+        graph.add_edge("embeddings", "reranker")
+        graph.add_edge("bm25", "reranker")   # 汇聚后进行重排序
+        graph.add_edge("reranker", "agronomist")
         graph.add_edge("agronomist", "save_memory")
         graph.add_edge("ordinary", "save_memory")
         graph.add_edge("save_memory", END)

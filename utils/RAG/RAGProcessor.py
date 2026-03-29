@@ -177,8 +177,7 @@ class RAGProcessor:
         retriever = self.vector_store_factory.get_retriever(search_kwargs)
 
         # 异步执行检索
-        loop = asyncio.get_event_loop()
-        docs = await loop.run_in_executor(None, retriever.invoke, query)
+        docs = await retriever.ainvoke(query)
 
         # 缓存结果
         if self.config.cache.enabled:
@@ -219,8 +218,7 @@ class RAGProcessor:
         k = k or self.config.retrieval.bm25_k
         self._bm25_retriever.k = k
 
-        loop = asyncio.get_event_loop()
-        docs = await loop.run_in_executor(None, self._bm25_retriever.invoke, query)
+        docs = await self._bm25_retriever.ainvoke(query)
 
         if self.config.cache.enabled:
             await self.cache_manager.acache_results(query, docs)
@@ -273,20 +271,7 @@ class RAGProcessor:
         # 并行执行两种检索
         k = k or self.config.retrieval.vector_k
 
-        async def vector_task():
-            search_kwargs = {"k": k}
-            if filters:
-                search_kwargs["filter"] = filters
-            retriever = self.vector_store_factory.get_retriever(search_kwargs)
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, retriever.invoke, query)
-
-        async def bm25_task():
-            self._bm25_retriever.k = k
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, self._bm25_retriever.invoke, query)
-
-        vector_docs, bm25_docs = await asyncio.gather(vector_task(), bm25_task())
+        vector_docs, bm25_docs = await asyncio.gather(self.avector_search(query, k), self.abm25_search(query, k))
 
         # 合并结果（不去重，后续重排序会处理）
         all_docs = vector_docs + bm25_docs
@@ -326,6 +311,25 @@ class RAGProcessor:
 
         # 过滤并返回
         return [doc for doc, score in reranked if score > threshold]
+
+    async def embeddings_and_bm25_with_rerank(self, query: str, k: Optional[int] = None,
+                                           embeddings_values: Optional[List[Document]] = None,
+                                           bm25_values: Optional[List[Document]] = None,
+                                           threshold: Optional[float] = None) -> List[Document]:
+        """向量检索+关键字检索 -> 重排序"""
+        docs = embeddings_values + bm25_values
+        # 异步重排序
+        threshold = threshold or self.config.reranker.threshold
+        reranked = await self.reranker_manager.arerank(query, docs)
+
+        result = [doc for doc, score in reranked if score > threshold]
+
+        logging.info(f'重排序{len(docs)}个结果，最终保留{len(result)}个结果')
+        if self.config.cache.enabled:
+            await self.cache_manager.acache_results(query, result)
+
+        return result
+
 
     async def aensemble_search_with_rerank(self, query: str, k: Optional[int] = None,
                                            filters: Optional[Dict[str, Any]] = None,

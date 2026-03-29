@@ -13,7 +13,7 @@ import os
 import logging
 from typing import List, Dict, Any, Optional, TypedDict, Literal, Annotated, AsyncGenerator
 from prompts import agronomist_prompt
-from utils.RAG.RAGProcessor import RAGProcessor
+from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
 from .Structer import StructOutput
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage, trim_messages
@@ -22,23 +22,16 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, Base
 class AgronomistAgentStreaming:
     """农事管理 - 流式输出版本"""
 
-    def __init__(self, model: BaseChatModel, rag_processor: RAGProcessor):
+    def __init__(self, model: BaseChatModel):
         self.llm = model
-        self.rag_processor = rag_processor
         self.prompt = agronomist_prompt
 
-    def handle(self, question: str, classify_info: StructOutput = None,
+    def handle(self, question: str, reranker_doc: List[Document] = None, classify_info: StructOutput = None,
                context_messages: Optional[List[BaseMessage]] = None) -> str:
         """非流式处理方法（保持兼容性）"""
-        # 调用知识库检索
-        query_strengthen = ''
-        if classify_info and classify_info.agronomist:
-            query_strengthen = classify_info.query_strengthen
-
-        results = self.rag_processor.ensemble_search_with_rerank(query_strengthen if query_strengthen else question)
         contexts = []
-        if results:
-            for i, item in enumerate(results):
+        if reranker_doc:
+            for i, item in enumerate(reranker_doc):
                 if isinstance(item, tuple):
                     doc, _ = item
                 else:
@@ -81,33 +74,22 @@ class AgronomistAgentStreaming:
             return result.content
         return "抱歉，暂未收录相关信息，建议升级成人工专员"
 
-    async def handle_stream(self, question: str, classify_info: StructOutput = None,
-                           context_messages: Optional[List[BaseMessage]] = None,
-                            streaming_callback = None) -> AsyncGenerator[str, None]:
+    async def handle_stream(self, question: str, reranker_doc: List[Document] = None, classify_info: StructOutput = None,
+                           context_messages: Optional[List[BaseMessage]] = None) -> AsyncGenerator[str, None]:
         """流式处理方法 - 真正实现流式输出"""
         # 调用知识库检索
         query_strengthen = ''
         if classify_info and classify_info.agronomist:
             query_strengthen = classify_info.query_strengthen
 
-        if streaming_callback:
-            await streaming_callback('准备检索知识库...\n')
-        results = await self.rag_processor.aensemble_search_with_rerank(query_strengthen if query_strengthen else question,
-                                                                        streaming_callback=streaming_callback)
         contexts = []
-        if results:
-            for i, item in enumerate(results):
+        if reranker_doc:
+            for i, item in enumerate(reranker_doc):
                 if isinstance(item, tuple):
                     doc, _ = item
                 else:
                     doc = item
-                if streaming_callback:
-                    await streaming_callback(f'检索到的第{i+1}个文档：\n')
-                    await streaming_callback(f'{doc.page_content}\n')
                 contexts.append(doc.page_content)
-
-        if streaming_callback:
-            await streaming_callback(f'好的，我已经准备好回答用户的提问了！\n</think>\n')
 
         if contexts:
             context = f"""基于以下农业知识回答问题:

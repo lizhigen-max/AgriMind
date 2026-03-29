@@ -334,7 +334,7 @@ pip install -r requirements.txt
 
 ### 2. 准备reranker模型和embeddings模型
 <div align="center">
-  <img src="./author/model.png" width="400px" alt="模型">
+  <img src="./author/model.png" width="800px" alt="模型">
 </div>
 
 ### 3. 配置环境变量
@@ -602,10 +602,10 @@ MIT License - 自由使用和修改，保留原作者署名即可。
 
 
 ## 📈 Star 趋势
-<a href="https://www.star-history.com/#lizhigen-max/AgriMind&Date">
+<a href="https://www.star-history.com/?repos=lizhigen-max%2FAgriMind&type=date&logscale=&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=lizhigen-max/AgriMind&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=lizhigen-max/AgriMind&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=lizhigen-max/AgriMind&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=lizhigen-max/AgriMind&type=date&theme=dark&logscale&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=lizhigen-max/AgriMind&type=date&logscale&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=lizhigen-max/AgriMind&type=date&logscale&legend=top-left" />
  </picture>
 </a>
